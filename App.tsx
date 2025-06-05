@@ -5,127 +5,181 @@
  * @format
  */
 
-import React from 'react';
-import type {PropsWithChildren} from 'react';
-import {
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  useColorScheme,
-  View,
-} from 'react-native';
+import React, { useEffect, useState, useRef } from 'react';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { initPowerSync } from './src/config/powersync';
+import AppNavigator from './src/navigation/AppNavigator';
+import { configureGoogleSignIn } from './src/config/google';
+import { initDatabase } from './src/services/database';
+import { useSettings } from './src/hooks/useSettings';
+import { useBiometrics } from './src/hooks/useBiometrics';
+import { NetworkStatusBar } from './src/components/NetworkStatusBar';
+import { View, ActivityIndicator, StyleSheet, Text, TouchableOpacity, AppState, AppStateStatus } from 'react-native';
+import { COLORS } from './src/constants/theme';
+import Toast from 'react-native-toast-message';
+import { GlobalErrorBoundary } from './src/components/GlobalErrorBoundary';
+import usePushNotifications from './src/hooks/usePushNotifications';
 
-import {
-  Colors,
-  DebugInstructions,
-  Header,
-  LearnMoreLinks,
-  ReloadInstructions,
-} from 'react-native/Libraries/NewAppScreen';
+const App = () => {
+  const { settings, updateSettings } = useSettings();
+  const { biometricState, checkBiometrics, authenticate } = useBiometrics();
+  const [isBiometricAuthenticated, setIsBiometricAuthenticated] = useState(false);
+  const [biometricLoading, setBiometricLoading] = useState(true);
+  const [biometricError, setBiometricError] = useState<string | null>(null);
 
-type SectionProps = PropsWithChildren<{
-  title: string;
-}>;
+  const appState = useRef(AppState.currentState);
 
-function Section({children, title}: SectionProps): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
-  return (
-    <View style={styles.sectionContainer}>
-      <Text
-        style={[
-          styles.sectionTitle,
-          {
-            color: isDarkMode ? Colors.white : Colors.black,
-          },
-        ]}>
-        {title}
-      </Text>
-      <Text
-        style={[
-          styles.sectionDescription,
-          {
-            color: isDarkMode ? Colors.light : Colors.dark,
-          },
-        ]}>
-        {children}
-      </Text>
-    </View>
-  );
-}
+  useEffect(() => {
+    configureGoogleSignIn();
+    initDatabase();
+  }, []);
 
-function App(): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
+  const handleBiometricCheck = async () => {
+    if (!settings.biometricEnabled) {
+      setIsBiometricAuthenticated(true);
+      setBiometricLoading(false);
+      setBiometricError(null);
+      return;
+    }
 
-  const backgroundStyle = {
-    backgroundColor: isDarkMode ? Colors.darker : Colors.lighter,
+    setBiometricLoading(true);
+    setBiometricError(null);
+
+    const available = await checkBiometrics();
+
+    if (available && biometricState.enrolled) {
+      const authenticated = await authenticate('Authenticate to access app');
+      setIsBiometricAuthenticated(authenticated);
+      if (!authenticated) {
+         setBiometricError('Biometric authentication failed. Please try again.');
+      } else {
+         setBiometricError(null); // Clear error on success
+      }
+    } else {
+      // If biometrics enabled but not available or enrolled, prevent access
+      setIsBiometricAuthenticated(false); 
+       if (!available) {
+        setBiometricError('Biometric authentication is not available on this device.');
+      } else if (!biometricState.enrolled) {
+        setBiometricError('Please set up biometrics in your device settings to enable this feature.');
+         // Optionally disable the setting if not enrolled and cannot authenticate
+        if (settings.biometricEnabled) {
+            // This might be better handled by informing the user in settings and not auto-disabling
+           // updateSettings({ biometricEnabled: false });
+        }
+      }
+    }
+    setBiometricLoading(false);
   };
 
-  /*
-   * To keep the template simple and small we're adding padding to prevent view
-   * from rendering under the System UI.
-   * For bigger apps the recommendation is to use `react-native-safe-area-context`:
-   * https://github.com/AppAndFlow/react-native-safe-area-context
-   *
-   * You can read more about it here:
-   * https://github.com/react-native-community/discussions-and-proposals/discussions/827
-   */
-  const safePadding = '5%';
+  useEffect(() => {
+    handleBiometricCheck();
+  }, [settings.biometricEnabled, biometricState.available, biometricState.enrolled]); // Re-run if biometric state changes
+
+   useEffect(() => {
+    const handleAppStateChange = (nextAppState: AppStateStatus) => {
+      if (
+        appState.current.match(/inactive|background/) &&
+        nextAppState === 'active' &&
+        settings.biometricEnabled
+      ) {
+        console.log('App has come to the foreground - triggering biometric check');
+        // Trigger re-authentication check when app comes to foreground
+        // We can reuse the existing handleBiometricCheck logic or a simplified version
+         handleBiometricCheck();
+      }
+
+      appState.current = nextAppState;
+    };
+
+    const appStateSubscription = AppState.addEventListener('change', handleAppStateChange);
+
+    return () => {
+      appStateSubscription.remove();
+    };
+  }, [settings.biometricEnabled, biometricState.available, biometricState.enrolled, authenticate, checkBiometrics]); // Dependencies for the effect
+
+  const retryBiometricAuthentication = async () => {
+      setBiometricLoading(true);
+      setBiometricError(null);
+       const authenticated = await authenticate('Authenticate to access app');
+       setIsBiometricAuthenticated(authenticated);
+       if (!authenticated) {
+           setBiometricError('Biometric authentication failed. Please try again.');
+       } else {
+           setBiometricError(null); // Clear error on success
+       }
+       setBiometricLoading(false);
+  };
+
+  // Initialize push notifications
+  usePushNotifications();
+
+  if (biometricLoading) {
+    return (
+      <View style={styles.centeredContainer}>
+        <ActivityIndicator size="large" color={COLORS.primary} />
+        {settings.biometricEnabled && <Text style={styles.loadingText}>Authenticating...</Text>}
+      </View>
+    );
+  }
+
+  if (!isBiometricAuthenticated && settings.biometricEnabled) {
+      // Handle case where authentication failed and setting is enabled
+      return (
+          <View style={styles.centeredContainer}>
+              <Text style={styles.errorText}>{biometricError || 'Biometric authentication is required to access the app.'}</Text>
+               {biometricState.available && biometricState.enrolled && settings.biometricEnabled && (
+                 <TouchableOpacity style={styles.retryButton} onPress={retryBiometricAuthentication}>
+                    <Text style={styles.retryButtonText}>Retry Authentication</Text>
+                 </TouchableOpacity>
+               )}
+          </View>
+      );
+  }
 
   return (
-    <View style={backgroundStyle}>
-      <StatusBar
-        barStyle={isDarkMode ? 'light-content' : 'dark-content'}
-        backgroundColor={backgroundStyle.backgroundColor}
-      />
-      <ScrollView
-        style={backgroundStyle}>
-        <View style={{paddingRight: safePadding}}>
-          <Header/>
-        </View>
-        <View
-          style={{
-            backgroundColor: isDarkMode ? Colors.black : Colors.white,
-            paddingHorizontal: safePadding,
-            paddingBottom: safePadding,
-          }}>
-          <Section title="Step One">
-            Edit <Text style={styles.highlight}>App.tsx</Text> to change this
-            screen and then come back to see your edits.
-          </Section>
-          <Section title="See Your Changes">
-            <ReloadInstructions />
-          </Section>
-          <Section title="Debug">
-            <DebugInstructions />
-          </Section>
-          <Section title="Learn More">
-            Read the docs to discover what to do next:
-          </Section>
-          <LearnMoreLinks />
-        </View>
-      </ScrollView>
-    </View>
+    <GlobalErrorBoundary>
+      <SafeAreaProvider>
+        <NetworkStatusBar />
+        <AppNavigator />
+        <Toast />
+      </SafeAreaProvider>
+    </GlobalErrorBoundary>
   );
-}
+};
 
 const styles = StyleSheet.create({
-  sectionContainer: {
-    marginTop: 32,
-    paddingHorizontal: 24,
+  centeredContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: COLORS.background,
+    padding: 20,
   },
-  sectionTitle: {
-    fontSize: 24,
-    fontWeight: '600',
-  },
-  sectionDescription: {
-    marginTop: 8,
-    fontSize: 18,
-    fontWeight: '400',
-  },
-  highlight: {
-    fontWeight: '700',
-  },
+   loadingText: {
+    marginTop: 10,
+    color: COLORS.text,
+   },
+   errorText: {
+     marginTop: 10,
+     color: COLORS.error,
+     textAlign: 'center',
+     marginHorizontal: 20,
+     fontSize: 16,
+   },
+   retryButton: {
+     marginTop: 20,
+     backgroundColor: COLORS.primary,
+     paddingVertical: 10,
+     paddingHorizontal: 20,
+     borderRadius: 8,
+   },
+    retryButtonText: {
+      color: COLORS.background,
+      fontSize: 16,
+      fontWeight: 'bold',
+    },
 });
 
 export default App;
