@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react';
-import { PowerSyncDatabase, Schema, Table, column, AbstractPowerSyncDatabase, ColumnType } from '@powersync/react-native';
+import { PowerSyncDatabase, Schema, Table, column, AbstractPowerSyncDatabase } from '@powersync/react-native';
 import { useSettings } from './useSettings';
 import { PowerSyncBackendConnector } from '@powersync/react-native';
 import * as FileSystem from 'expo-file-system';
+import { openDatabaseSync } from 'expo-sqlite';
+import { getSecureValue, setSecureValue } from '../utils/secureStorage';
+import * as Crypto from 'expo-crypto';
 
 interface User {
   id: string;
@@ -35,6 +38,11 @@ const getPowerSyncConfig = (): PowerSyncConfig => {
   }
 
   return { endpoint, token };
+};
+
+const generateEncryptionKey = async (): Promise<string> => {
+  const randomBytes = await Crypto.getRandomBytesAsync(32);
+  return Buffer.from(randomBytes).toString('base64');
 };
 
 export const useSync = (user: User | null): SyncState => {
@@ -79,7 +87,7 @@ export const useSync = (user: User | null): SyncState => {
           },
           body: JSON.stringify({
             userId: user.id,
-            data: await database.getAll(),
+            data: await database.getAll('SELECT * FROM notes'),
           }),
         });
 
@@ -104,55 +112,42 @@ export const useSync = (user: User | null): SyncState => {
         setError(null);
         
         const AppSchema = new Schema({
-          version: 1,
-          tables: [
-            {
-              name: 'notes',
-              columns: [
-                { name: 'id', type: ColumnType.TEXT, primaryKey: true },
-                { name: 'title', type: ColumnType.TEXT, nullable: false },
-                { name: 'content', type: ColumnType.TEXT, nullable: false },
-                { name: 'category_id', type: ColumnType.TEXT, nullable: false },
-                { name: 'created_at', type: ColumnType.INTEGER, nullable: false },
-                { name: 'updated_at', type: ColumnType.INTEGER, nullable: false },
-                { name: 'deleted_at', type: ColumnType.INTEGER, nullable: true },
-                { name: 'user_id', type: ColumnType.TEXT, nullable: false },
-                { name: 'is_pinned', type: ColumnType.INTEGER, defaultValue: 0 },
-                { name: 'is_archived', type: ColumnType.INTEGER, defaultValue: 0 },
-                { name: 'sync_status', type: ColumnType.TEXT, defaultValue: 'pending' },
-              ],
-              indexes: [
-                { name: 'idx_notes_user_id', columns: ['user_id'] },
-                { name: 'idx_notes_category', columns: ['category_id'] },
-                { name: 'idx_notes_created', columns: ['created_at'] },
-                { name: 'idx_notes_sync', columns: ['sync_status'] },
-              ],
-            },
-            {
-              name: 'categories',
-              columns: [
-                { name: 'id', type: ColumnType.TEXT, primaryKey: true },
-                { name: 'name', type: ColumnType.TEXT, nullable: false },
-                { name: 'color', type: ColumnType.TEXT, nullable: false },
-                { name: 'created_at', type: ColumnType.INTEGER, nullable: false },
-                { name: 'updated_at', type: ColumnType.INTEGER, nullable: false },
-                { name: 'user_id', type: ColumnType.TEXT, nullable: false },
-                { name: 'sync_status', type: ColumnType.TEXT, defaultValue: 'pending' },
-              ],
-              indexes: [
-                { name: 'idx_categories_user_id', columns: ['user_id'] },
-                { name: 'idx_categories_sync', columns: ['sync_status'] },
-              ],
-            },
-          ],
+          notes: new Table({
+            id: column.text,
+            title: column.text,
+            content: column.text,
+            category_id: column.text,
+            created_at: column.integer,
+            updated_at: column.integer,
+            deleted_at: column.integer,
+            user_id: column.text,
+            is_pinned: column.integer,
+            is_archived: column.integer,
+            sync_status: column.text,
+          }),
+          categories: new Table({
+            id: column.text,
+            name: column.text,
+            color: column.text,
+            created_at: column.integer,
+            updated_at: column.integer,
+            user_id: column.text,
+            sync_status: column.text,
+          }),
         });
 
         const dbPath = `${FileSystem.documentDirectory}everynote_kapybara.db`;
+        
+        // Get or generate encryption key
+        let encryptionKey = await getSecureValue('db_encryption_key');
+        if (!encryptionKey) {
+          encryptionKey = await generateEncryptionKey();
+          await setSecureValue('db_encryption_key', encryptionKey);
+        }
+
         const db = new PowerSyncDatabase({
           schema: AppSchema,
-          database: {
-            name: dbPath,
-          },
+          database: openDatabaseSync(dbPath),
           sync: {
             endpoint: process.env.EXPO_PUBLIC_POWERSYNC_URL ?? '',
             token: process.env.EXPO_PUBLIC_POWERSYNC_TOKEN ?? '',
