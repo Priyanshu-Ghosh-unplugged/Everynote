@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { PowerSyncDatabase, Schema, Table, column, AbstractPowerSyncDatabase } from '@powersync/react-native';
+import { PowerSyncDatabase, Schema, Table, column, AbstractPowerSyncDatabase, SQLOpenOptions, PowerSyncDatabaseOptions } from '@powersync/react-native';
 import { useSettings } from './useSettings';
 import { PowerSyncBackendConnector } from '@powersync/react-native';
 import * as FileSystem from 'expo-file-system';
@@ -147,7 +147,10 @@ export const useSync = (user: User | null): SyncState => {
 
         const db = new PowerSyncDatabase({
           schema: AppSchema,
-          database: openDatabaseSync(dbPath),
+          database: {
+            dbFilename: dbPath,
+            location: 'default'
+          } as SQLOpenOptions,
           sync: {
             endpoint: process.env.EXPO_PUBLIC_POWERSYNC_URL ?? '',
             token: process.env.EXPO_PUBLIC_POWERSYNC_TOKEN ?? '',
@@ -160,7 +163,7 @@ export const useSync = (user: User | null): SyncState => {
               strategy: 'server-wins',
             },
           },
-        });
+        } as PowerSyncDatabaseOptions);
 
         await db.init();
         await db.connect(connector);
